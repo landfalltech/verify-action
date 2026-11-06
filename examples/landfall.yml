@@ -17,7 +17,7 @@ jobs:
         with: { node-version: 20 }
       - run: npm ci
       - run: npx vitest run --reporter=junit --outputFile=junit.xml
-      - uses: OWNER/verify-action@v1
+      - uses: landfalltech/verify-action@v1
         with:
           contract-path: compliance-contract.yaml
           test-results: junit.xml
