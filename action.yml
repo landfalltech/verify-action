@@ -1,0 +1,195 @@
+name: 'Landfall Compliance Verification'
+description: 'Check a Landfall compliance contract and report tagged test results to Landfall (signed reporting protocol 2.0)'
+author: 'Landfall'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+# Reports are signed with the project's CI credential (webhook id + secret),
+# created on the project's "Connect your pipeline" page. On a pull request the
+# report names the PR's HEAD commit, which is what the `Landfall / obligations`
+# check matches on (GITHUB_SHA is GitHub's merge commit there).
+#
+# Fork pull requests get no secrets: the action then runs without reporting
+# and says so. Never run this from `pull_request_target` with a checkout of the
+# PR head; that hands the secret to untrusted code.
+
+inputs:
+  contract-path:
+    description: 'Path to the compliance contract exported from Landfall'
+    required: false
+    default: 'compliance-contract.yaml'
+  test-results:
+    description: 'Comma-separated JUnit XML or Jest/Vitest JSON result files. Tests named with [landfall:req-<ticketId>#<n>] report criterion n of that ticket'
+    required: false
+    default: ''
+  api-url:
+    description: 'Landfall URL reports are sent to, e.g. https://app.landfalltech.io'
+    required: false
+    default: ''
+  project-id:
+    description: 'Landfall project id'
+    required: false
+    default: ''
+  webhook-id:
+    description: 'The CI credential id (shown when you create it in Landfall)'
+    required: false
+    default: ''
+  webhook-secret:
+    description: 'The CI credential secret. Pass it from a secret: ${{ secrets.RTB_WEBHOOK_SECRET }}'
+    required: false
+    default: ''
+  api-key:
+    description: 'Deprecated: old name for webhook-secret. Still accepted, with a warning'
+    required: false
+    default: ''
+    deprecationMessage: 'api-key is deprecated. Pass the CI credential as webhook-secret and its id as webhook-id.'
+  commit-sha:
+    description: 'Commit the report names. Defaults to the PR head commit on pull_request events, else GITHUB_SHA'
+    required: false
+    default: ${{ github.event.pull_request.head.sha || github.sha }}
+  branch:
+    description: 'Branch the report names'
+    required: false
+    default: ${{ github.head_ref || github.ref_name }}
+  run-id:
+    description: 'Unique id of this execution. Add the matrix job if you run the action more than once per job'
+    required: false
+    default: ${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+  require-reporting:
+    description: 'Fail unless Landfall accepts the signed report (only when a webhook secret is present)'
+    required: false
+    default: 'false'
+  mode:
+    description: 'Enforcement mode: strict, warn, audit'
+    required: false
+    default: 'strict'
+  format:
+    description: 'Output format: text, json, github, yaml, policy-trace'
+    required: false
+    default: 'github'
+  working-directory:
+    description: 'Directory to verify (the contract path and test result paths are relative to it)'
+    required: false
+    default: '.'
+  fail-on-warning:
+    description: 'Exit with an error on warnings'
+    required: false
+    default: 'false'
+  local-only:
+    description: 'Send nothing to Landfall'
+    required: false
+    default: 'false'
+  cli-version:
+    description: 'Version of @landfalltech/verify to run (pinned; change deliberately)'
+    required: false
+    default: '2.3.0'
+  node-version:
+    description: 'Node.js version'
+    required: false
+    default: '20'
+
+outputs:
+  passed:
+    description: 'Number of checks that passed'
+    value: ${{ steps.verify.outputs.passed }}
+  failed:
+    description: 'Number of checks that failed'
+    value: ${{ steps.verify.outputs.failed }}
+  warnings:
+    description: 'Number of warnings'
+    value: ${{ steps.verify.outputs.warnings }}
+  integrity:
+    description: 'Contract integrity status: VERIFIED, TAMPERED, or SKIPPED'
+    value: ${{ steps.verify.outputs.integrity }}
+  reported:
+    description: 'true when the run reported to Landfall (a webhook secret was present and local-only was off)'
+    value: ${{ steps.verify.outputs.reported }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Run Landfall verification
+      id: verify
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      # Inputs reach the script only through the environment, never pasted
+      # into it, so a branch name or path cannot inject shell.
+      env:
+        IN_CONTRACT: ${{ inputs.contract-path }}
+        IN_TEST_RESULTS: ${{ inputs.test-results }}
+        IN_MODE: ${{ inputs.mode }}
+        IN_FORMAT: ${{ inputs.format }}
+        IN_COMMIT_SHA: ${{ inputs.commit-sha }}
+        IN_BRANCH: ${{ inputs.branch }}
+        IN_FAIL_ON_WARNING: ${{ inputs.fail-on-warning }}
+        IN_LOCAL_ONLY: ${{ inputs.local-only }}
+        IN_REQUIRE_REPORTING: ${{ inputs.require-reporting }}
+        IN_CLI_VERSION: ${{ inputs.cli-version }}
+        IN_API_KEY: ${{ inputs.api-key }}
+        IN_WEBHOOK_SECRET: ${{ inputs.webhook-secret }}
+        RTB_API_URL: ${{ inputs.api-url }}
+        RTB_PROJECT_ID: ${{ inputs.project-id }}
+        RTB_WEBHOOK_ID: ${{ inputs.webhook-id }}
+        RTB_RUN_ID: ${{ inputs.run-id }}
+      run: |
+        set -euo pipefail
+
+        if [ "$IN_CLI_VERSION" = "latest" ]; then
+          echo "::warning::cli-version 'latest' is not pinned; a new CLI release could change this check. Pin a version, e.g. 2.3.0."
+        fi
+        if ! printf '%s' "$IN_CLI_VERSION" | grep -Eq '^(latest|[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?)$'; then
+          echo "::error::cli-version must be a version number such as 2.3.0"
+          exit 1
+        fi
+
+        SECRET="$IN_WEBHOOK_SECRET"
+        if [ -z "$SECRET" ] && [ -n "$IN_API_KEY" ]; then
+          echo "::warning::The api-key input is deprecated. Pass the CI credential as webhook-secret and its id as webhook-id."
+          SECRET="$IN_API_KEY"
+        fi
+
+        ARGS=("$IN_CONTRACT" --mode "$IN_MODE" --format "$IN_FORMAT")
+        if [ -n "$IN_COMMIT_SHA" ]; then ARGS+=(--commit-sha "$IN_COMMIT_SHA"); fi
+        if [ -n "$IN_BRANCH" ]; then ARGS+=(--branch "$IN_BRANCH"); fi
+        if [ -n "$IN_TEST_RESULTS" ]; then ARGS+=(--test-results "$IN_TEST_RESULTS"); fi
+        if [ "$IN_FAIL_ON_WARNING" = "true" ]; then ARGS+=(--fail-on-warning); fi
+
+        REPORTED=false
+        if [ "$IN_LOCAL_ONLY" = "true" ]; then
+          ARGS+=(--local-only)
+        elif [ -z "$SECRET" ]; then
+          # Typical for pull requests from forks, which get no secrets.
+          echo "::notice::No webhook secret available (for example a pull request from a fork): running without reporting to Landfall. Criteria checked by CI stay pending in Landfall."
+          ARGS+=(--local-only)
+        else
+          export RTB_WEBHOOK_SECRET="$SECRET"
+          if [ "$IN_REQUIRE_REPORTING" = "true" ]; then ARGS+=(--require-reporting); fi
+          REPORTED=true
+        fi
+
+        set +e
+        OUTPUT=$(npx --yes "@landfalltech/verify@${IN_CLI_VERSION}" "${ARGS[@]}" 2>&1)
+        EXIT_CODE=$?
+        set -e
+        echo "$OUTPUT"
+
+        PASSED=$(echo "$OUTPUT" | grep -oP '(?<=Passed: )\d+' | head -n1 || true)
+        FAILED=$(echo "$OUTPUT" | grep -oP '(?<=Failed: )\d+' | head -n1 || true)
+        WARNINGS=$(echo "$OUTPUT" | grep -oP '(?<=Warnings: )\d+' | head -n1 || true)
+        INTEGRITY=$(echo "$OUTPUT" | grep -oP '(?<=Integrity: )\w+' | head -n1 || true)
+        {
+          echo "passed=${PASSED:-0}"
+          echo "failed=${FAILED:-0}"
+          echo "warnings=${WARNINGS:-0}"
+          echo "integrity=${INTEGRITY:-SKIPPED}"
+          echo "reported=$REPORTED"
+        } >> "$GITHUB_OUTPUT"
+
+        exit $EXIT_CODE
